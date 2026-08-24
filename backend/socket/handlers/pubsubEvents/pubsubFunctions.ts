@@ -39,54 +39,33 @@ function validateMessage(text: string, maxLength: number = 5000): { valid: boole
 
 export async function typingInRoom(socket : Socket , data : {roomname : string}){
     try {
-        const checkRoom = await prisma.room.findFirst({
-            where : {roomname : data.roomname , author : {some : {id : socket.data.userId}}}
+        const member = await prisma.roomMember.findFirst({
+            where : {
+                user_id : socket.data.userId,
+                room : { roomname : data.roomname }
+            },
+            include : { room : true }
         })
 
-        if(!checkRoom) {
-            socket.emit('error' , {message : "Room not exists or not a memeber"})
+        if(!member) {
+            socket.emit('error' , {message : "Room does not exist or not a member"})
             return 
         }
 
         const payload = {
             event_type: 'typing',
             username : socket.data.username , 
-            roomname : checkRoom.roomname
+            roomname : member.room.roomname
         }
 
-        await publishEvent(`room:${checkRoom.id}` , payload)
+        await publishEvent(`room:${member.room.id}` , payload)
         
     } catch (error : any) {
-        socket.emit('error' , {message : "Failed to get loaded"})
+        socket.emit('error' , {message : "Failed to emit typing"})
     }
 }
 
-export async function typingToUser(socket : Socket , data : {username : string}){
-    try {
-        const checkUser = await prisma.user.findFirst({
-            where : {username : data.username , } ,
-        })
-
-        if(!checkUser) {
-            socket.emit('error' , {message : "User not found"})
-            return 
-        }
-
-        const payload = {
-            event_type: 'typing',
-            username : socket.data.username
-        }
-        await publishEvent(`user:${checkUser.id}` , payload)
-
-    } catch (error : any) {
-        socket.emit('error' , {message : "Failed to get loaded"})
-    }
-}
-
-
-
-export async function sendRoomMessage(socket : Socket , data : {text : string , roomname : string}){
-
+export async function sendRoomMessage(socket : Socket , data : {text : string , roomname : string, target_mode?: 'all' | 'to' | 'not_to' | 'not_to_all', target_users?: string[]}){
     try {
         const validation = validateMessage(data.text)
         if (!validation.valid) {
@@ -94,80 +73,59 @@ export async function sendRoomMessage(socket : Socket , data : {text : string , 
             return
         }
 
-        const room = await prisma.room.findFirst({
+        const member = await prisma.roomMember.findFirst({
             where : {
-                roomname : data.roomname ,
-                author : {some :  {id : socket.data.userId}}}
+                user_id : socket.data.userId,
+                room : { roomname : data.roomname }
+            },
+            include : { room : true }
         })
 
-        if(!room) {
-            socket.emit('error' , { message : "Room does not exists or not a member"})
+        if(!member) {
+            socket.emit('error' , { message : "Room does not exist or not a member"})
             return 
         }
+
+        // Ensure socket is joined to the socket room and subscribed to Redis channel
+        if (!socket.rooms.has(member.room.id)) {
+            socket.join(member.room.id);
+            if (!socket.data.joinedRooms) socket.data.joinedRooms = new Set<string>();
+            socket.data.joinedRooms.add(member.room.id);
+        }
+        if (!isSubscribed(`room:${member.room.id}`)) {
+            await subscribeToChannel(`room:${member.room.id}`);
+        }
+
+        const targetMode = data.target_mode === 'to' || data.target_mode === 'not_to' || data.target_mode === 'not_to_all' ? data.target_mode : 'all';
+        const targetUsers = Array.isArray(data.target_users) ? data.target_users.filter(u => typeof u === 'string' && u.trim().length > 0) : [];
 
         const message = await prisma.roomMessage.create({
             data : {
                 content : data.text ,
-                room_id : room.id ,
+                type : "chat",
+                target_mode : targetMode,
+                target_users : targetUsers,
+                room_id : member.room.id ,
                 user_id : socket.data.userId ,
             }
         })
         const payload = {
+            id : message.id,
             event_type: 'chat',
             chat_type: 'room',
+            type : 'chat',
+            target_mode : targetMode,
+            target_users : targetUsers,
             from : socket.data.username , 
             text : message.content , 
-            to : room.roomname , 
+            to : member.room.roomname , 
             sent_at : message.sent_at 
         }
 
-        await publishEvent(`room:${room.id}` , payload)
+        await publishEvent(`room:${member.room.id}` , payload)
     } catch (error : any) {
-        console.log(error.message)
-        socket.emit('error' , {message : "Failed send message"})
-    }
-}
-
-
-
-export async function sendDirectMessage(socket : Socket , data : {text : string , otheruser : string}){
-    try {
-        const validation = validateMessage(data.text)
-        if (!validation.valid) {
-            socket.emit('error' , { message : validation.error })
-            return
-        }
-
-        const otherUser = await prisma.user.findFirst({
-            where : {username : data.otheruser}
-        })
-        
-        if(!otherUser){
-            socket.emit('error' , {message : "User does not exists"})
-            return
-        }
-        
-        const message = await prisma.directMessage.create({
-            data : {
-                content : data.text ,
-                sender_id : socket.data.userId , 
-                receiver_id : otherUser.id ,
-            }
-        })
-        const payload = {
-            event_type: 'chat',
-            chat_type: 'direct',
-            from : socket.data.username , 
-            text : message.content , 
-            to : otherUser.username ,
-            sent_at : message.sent_at ,
-        }
-
-        await publishEvent(`user:${otherUser.id}` , payload)
-        
-    } catch (error : any){
-        console.log(error.message)
-        socket.emit('error' , {message : "Failed to send message"})
+        console.error("sendRoomMessage error:", error)
+        socket.emit('error' , {message : error?.message ?? "Failed to send message"})
     }
 }
 
@@ -183,61 +141,114 @@ export async function createRoom(socket : Socket , data : {roomname : string , d
             return 
         }
 
+        const now = new Date();
         const room = await prisma.room.create({
             data : {
                 roomname : data.roomname , 
                 description : data.description ,
                 created_by : socket.data.username ,
-                author : {
-                    connect : {id : socket.data.userId}
+                created_at : now,
+                members : {
+                    create : {
+                        user_id : socket.data.userId,
+                        joined_at : now
+                    }
                 }
             }
         })
 
+        // Record room creation system event
+        await prisma.roomMessage.create({
+            data : {
+                content : `${socket.data.username} created room #${room.roomname}`,
+                type : "system",
+                sent_at : now,
+                room_id : room.id,
+                user_id : socket.data.userId
+            }
+        })
+
         socket.join(room.id)
+        if (!socket.data.joinedRooms) socket.data.joinedRooms = new Set<string>();
+        socket.data.joinedRooms.add(room.id);
+
         socket.emit('room_created' , {roomname : room.roomname})
 
         await subscribeToChannel(`room:${room.id}`)
 
     } catch (error : any) {
-        console.log(error.message)
-        socket.emit('error' , {message : "Failed to create room"})
+        console.error("createRoom error:", error);
+        socket.emit('error' , {message : error?.message ?? "Failed to create room"})
     }
 }
 
 export async function joinRoom(socket : Socket , data : {roomname : string}){
     try {
         const existingRoom = await prisma.room.findFirst({
-            where : {roomname : data.roomname} ,
-            include : {
-                author : {where : {id : socket.data.userId}}
-            }
+            where : {roomname : data.roomname}
         })            
 
         if(!existingRoom) {
-            socket.emit('error' , {message : "Room doesn't exists"})
+            socket.emit('error' , {message : "Room doesn't exist"})
             return
         }
 
-        if(existingRoom.author.length > 0) {
-            socket.emit('error' , {message : "Aready a member"})
-            return
-        }
-
-        await prisma.room.update({
-            where : {roomname : data.roomname} ,
-            data : {
-                author : {
-                    connect : { id : socket.data.userId }
+        const existingMember = await prisma.roomMember.findUnique({
+            where : {
+                user_id_room_id : {
+                    user_id : socket.data.userId,
+                    room_id : existingRoom.id
                 }
             }
         })
+
+        if(existingMember) {
+            socket.emit('error' , {message : "Already a member"})
+            return
+        }
+
+        const joinTime = new Date();
+        await prisma.roomMember.create({
+            data : {
+                user_id : socket.data.userId,
+                room_id : existingRoom.id,
+                joined_at : joinTime
+            }
+        })
+
+        // Record system join message
+        const systemMessage = await prisma.roomMessage.create({
+            data : {
+                content : `${socket.data.username} joined the room`,
+                type : "system",
+                sent_at : joinTime,
+                room_id : existingRoom.id,
+                user_id : socket.data.userId
+            }
+        })
+
         socket.join(existingRoom.id)
+        if (!socket.data.joinedRooms) socket.data.joinedRooms = new Set<string>();
+        socket.data.joinedRooms.add(existingRoom.id);
+
         socket.emit('joined_room' , {roomname : existingRoom.roomname})
 
+        // Broadcast join event to all members in the room in sequential order
         const payload = {
-            event_type: 'join',
-            username : socket.data.username
+            id : systemMessage.id,
+            event_type: 'chat',
+            chat_type: 'room',
+            type : 'system',
+            from : 'system',
+            text : systemMessage.content,
+            to : existingRoom.roomname,
+            sent_at : systemMessage.sent_at,
+            member_change: 'join',
+            member: {
+                id: socket.data.userId,
+                username: socket.data.username,
+                joined_at: joinTime.toISOString()
+            }
         }
         await publishEvent(`room:${existingRoom.id}` , payload)
 
@@ -245,57 +256,94 @@ export async function joinRoom(socket : Socket , data : {roomname : string}){
             await subscribeToChannel(`room:${existingRoom.id}`)
         }
     } catch (error : any) {
-        console.log(error.message)
-        socket.emit('error' , {message : "Failed to join room"})
+        console.error("joinRoom error:", error)
+        socket.emit('error' , {message : error?.message ?? "Failed to join room"})
     }
 }
 
 export async function leaveRoom(socket : Socket , data : {roomname : string}){
     try {
         const existingRoom = await prisma.room.findFirst({
-            where : {roomname : data.roomname} ,
-            include : {
-                author : {where : {id : socket.data.userId}},
-                _count : {select : {author : true}}
-            }
+            where : {roomname : data.roomname}
         })            
 
         if(!existingRoom){
-            socket.emit('error' , {message : "Room doesn't exists"})
+            socket.emit('error' , {message : "Room doesn't exist"})
             return     
         }
 
-        if(existingRoom.author.length === 0){
+        const existingMember = await prisma.roomMember.findUnique({
+            where : {
+                user_id_room_id : {
+                    user_id : socket.data.userId,
+                    room_id : existingRoom.id
+                }
+            }
+        })
+
+        if(!existingMember){
             socket.emit('error' , {message : "Not a member of this group"})
             return
         }
 
-        await prisma.room.update({
-            where : {roomname : data.roomname} ,
+        const leaveTime = new Date();
+
+        // Record system leave message before removing membership
+        const systemMessage = await prisma.roomMessage.create({
             data : {
-                author : {
-                    disconnect : { id : socket.data.userId }
+                content : `${socket.data.username} left the room`,
+                type : "system",
+                sent_at : leaveTime,
+                room_id : existingRoom.id,
+                user_id : socket.data.userId
+            }
+        })
+
+        // Delete RoomMember record
+        await prisma.roomMember.delete({
+            where : {
+                user_id_room_id : {
+                    user_id : socket.data.userId,
+                    room_id : existingRoom.id
                 }
             }
         })
 
         socket.leave(existingRoom.id)
+        if (socket.data.joinedRooms) {
+            socket.data.joinedRooms.delete(existingRoom.id);
+        }
         socket.emit('left_room' , {roomname : existingRoom.roomname})
 
+        // Broadcast leave system event to remaining members in room
         const payload = {
-            event_type: 'leave',
-            username : socket.data.username
+            id : systemMessage.id,
+            event_type: 'chat',
+            chat_type: 'room',
+            type : 'system',
+            from : 'system',
+            text : systemMessage.content,
+            to : existingRoom.roomname,
+            sent_at : systemMessage.sent_at,
+            member_change: 'leave',
+            member: {
+                id: socket.data.userId,
+                username: socket.data.username
+            }
         }
-
-        const remainingSocket = await socket.in(existingRoom.id).fetchSockets()
-        
         await publishEvent(`room:${existingRoom.id}` , payload)
 
-        // Check if room member count is now zero
-        if(remainingSocket.length == 0){
-            await unsubscribeFromChannel(`room:${existingRoom.id}`)
-            
-            // Delete all messages in the room first (foreign key constraint)
+        // Cleanup local instance subscription for this socket
+        await unsubscribeFromChannel(`room:${existingRoom.id}`);
+
+        // Check remaining DB members count across all instances
+        const remainingMembersCount = await prisma.roomMember.count({
+            where: { room_id: existingRoom.id }
+        });
+
+        // Only delete room and its messages when NO members remain in DB
+        if (remainingMembersCount === 0) {
+            // Delete all messages in the room
             await prisma.roomMessage.deleteMany({
                 where : {room_id : existingRoom.id}
             })
@@ -305,21 +353,20 @@ export async function leaveRoom(socket : Socket , data : {roomname : string}){
                 where : {id : existingRoom.id}
             })
             
-            // Notify all users that room is deleted so they can update search results
+            // Notify all users globally that room was deleted
             const deletePayload = {
                 event_type: 'room_deleted',
                 roomname : existingRoom.roomname,
                 roomId : existingRoom.id
             }
             
-            // Publish to global channel so ALL connected users get notified
             await publishEvent(`global:rooms` , deletePayload)
             
-            console.log(`✅ Room '${existingRoom.roomname}' deleted (no members remaining)`)
+            console.log(`✅ Room '${existingRoom.roomname}' deleted (no members remaining in DB)`)
         }
 
     } catch (error : any) {
-        console.log(error.message)
-        socket.emit('error' , {message : "Failed to leave room"})
+        console.error("leaveRoom error:", error)
+        socket.emit('error' , {message : error?.message ?? "Failed to leave room"})
     }
 }

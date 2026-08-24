@@ -13,11 +13,8 @@ model User {
   password String
   username  String @unique
   created_at DateTime @default(now())
-  rooms Room[]
+  memberships RoomMember[]
   messages RoomMessage[]
-
-  sMessage DirectMessage[] @relation("dm_sent")
-  rMessage DirectMessage[] @relation("dm_received")
 }
 
 model Room {
@@ -27,25 +24,35 @@ model Room {
   created_by String
   created_at DateTime @default(now())
   messages RoomMessage[]
-  author User[]
+  members RoomMember[]
+}
+
+model RoomMember {
+  id String @id @default(cuid())
+  user_id String
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  room_id String
+  room Room @relation(fields: [room_id], references: [id], onDelete: Cascade)
+  joined_at DateTime @default(now())
+
+  @@unique([user_id, room_id])
+  @@index([room_id, joined_at])
+  @@index([user_id])
 }
 
 model RoomMessage { 
-  id    String     @id @default(cuid()) 
-  content   String
-  sent_at DateTime @default(now())
-  room_id     String
-  room Room @relation(fields: [room_id] , references: [id])
-  user_id  String
-  user    User    @relation(fields: [user_id], references: [id]) 
+  id           String     @id @default(cuid()) 
+  content      String
+  type         String     @default("chat")
+  target_mode  String     @default("all")
+  target_users String[]   @default([])
+  sent_at      DateTime   @default(now())
+  room_id      String
+  room         Room       @relation(fields: [room_id] , references: [id], onDelete: Cascade)
+  user_id      String?
+  user         User?      @relation(fields: [user_id], references: [id], onDelete: SetNull)
+
+  @@index([room_id, sent_at])
 } 
 
-model DirectMessage { 
-  id    String     @id @default(cuid()) 
-  content   String
-  sent_at DateTime @default(now())
-  sender_id  String
-  sender    User    @relation("dm_sent" , fields: [sender_id], references: [id]) 
-  receiver_id String
-  receiver User @relation("dm_received" , fields: [receiver_id] , references: [id])
-} 
+

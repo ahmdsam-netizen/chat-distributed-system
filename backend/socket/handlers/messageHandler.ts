@@ -1,116 +1,105 @@
 import { Server, Socket } from "socket.io"
 import prisma from "@/lib/prisma"
-import { typingInRoom , sendDirectMessage , sendRoomMessage , typingToUser } from "./pubsubEvents/pubsubFunctions"
+import { typingInRoom , sendRoomMessage } from "./pubsubEvents/pubsubFunctions"
 
 export default function messageHandler(io : Server , socket : Socket){
-    socket.on('message_in_room' , async (data : {text : string , roomname : string}) => {
+    socket.on('message_in_room' , async (data : {text : string , roomname : string, target_mode?: 'all' | 'to' | 'not_to' | 'not_to_all', target_users?: string[]}) => {
         try {
             await sendRoomMessage(socket , data)
         } catch (error : any) {
-            console.log(error.message)
-            socket.emit('error' , {message : "Failed send message"})
+            console.error("message_in_room error:", error)
+            socket.emit('error' , {message : error?.message ?? "Failed to send message"})
         }
     })
-
-    socket.on('message_to_user' , async (data : {otheruser : string , text : string}) => {
-        try {
-            await sendDirectMessage(socket , data)
-        } catch (error : any){
-            console.log(error.message)
-            socket.emit('error' , {message : "Failed to send message"})
-        }
-    })
-
-
-    socket.on('typing_to_user' , async (data : {username : string}) => {
-        try {
-            await typingToUser(socket , data)
-        } catch (error : any) {
-            socket.emit('error' , {message : "Failed to get loaded"})
-        }
-    })
-
 
     socket.on('typing_in_room' , async (data : {roomname : string}) => {
         try {
             await typingInRoom(socket , data) 
         } catch (error : any) {
-            socket.emit('error' , {message : "Failed to get loaded"})
+            socket.emit('error' , {message : "Failed to emit typing"})
         }
     })
 
-    socket.on('get_message_of_room' , async (data : {roomname : string}) => {
+    socket.on('get_message_of_room' , async (data : {roomname : string, cursor? : string, limit? : number}) => {
         try {
-            const getRoom = await prisma.room.findFirst({
-                where : { roomname : data.roomname } ,
-                include : {author : {where : {id : socket.data.userId}}}
-            })
-
-            if(!getRoom || getRoom.author.length == 0) {
-                socket.emit('error' , { message : "Room does not exists or not a member"})
-                return 
-            }
-
-            const last50Message = await prisma.roomMessage.findMany({
-                where : { room_id : getRoom.id } , 
-                include : {user : {select : {username : true}}} ,
-                orderBy : { sent_at : "desc"},
-                take : 50
-            }).then(message => message.reverse())
-
-            socket.emit('group_chat' , last50Message.map(message => ({
-                content : message.content ,
-                sent_at : message.sent_at ,
-                sent_by : message.user.username ,
-                sent_to : getRoom.roomname 
-            })))
-
-        } catch (error : any) {
-            console.error(error)
-            socket.emit('error' , {message : "Failed to fetch messages"})
-        }
-    })
-
-
-    socket.on('get_message_of_user' , async (data : {username : string}) => {
-        try {
-            const getUser = await prisma.user.findFirst({
-                where : { username : data.username }
-            })
-
-            if(!getUser) {
-                socket.emit('error' , { message : "User does not exists"})
-                return 
-            }
-
-            const last50Message = await prisma.directMessage.findMany({
+            const member = await prisma.roomMember.findFirst({
                 where : {
-                    AND : [{
-                        OR : [
-                            {sender_id : getUser.id , receiver_id : socket.data.userId} , 
-                            {sender_id : socket.data.userId , receiver_id : getUser.id} , 
-                        ]}
+                    user_id : socket.data.userId,
+                    room : { roomname : data.roomname }
+                },
+                include : { room : true }
+            })
+
+            if(!member) {
+                socket.emit('error' , { message : "Room does not exist or not a member"})
+                return 
+            }
+
+            const limit = Math.min(Math.max(Number(data.limit) || 30, 1), 100);
+            const cursorDate = data.cursor ? new Date(data.cursor) : null;
+            const currentUsername = socket.data.username;
+
+            // Query only messages sent at or after user joined the room
+            // and strictly before cursor if paginating backward,
+            // matching target_mode rules
+            const messages = await prisma.roomMessage.findMany({
+                where : {
+                    room_id : member.room.id,
+                    sent_at : {
+                        gte : member.joined_at,
+                        ...(cursorDate ? { lt : cursorDate } : {})
+                    },
+                    OR : [
+                        { type : "system" },
+                        { user_id : socket.data.userId },
+                        { target_mode : "all" },
+                        {
+                            target_mode : "to",
+                            target_users : { has : currentUsername }
+                        },
+                        {
+                            target_mode : "not_to",
+                            NOT : {
+                                target_users : { has : currentUsername }
+                            }
+                        }
                     ]
                 } , 
-                include : {
-                    sender : {select : {username : true}}  , 
-                    receiver : {select : {username : true}}
-                } ,
+                include : {user : {select : {username : true}}} ,
                 orderBy : { sent_at : "desc"},
-                take : 50
-            }).then(message => message.reverse())
+                take : limit + 1
+            })
 
-            socket.emit('direct_chat' , last50Message.map(message => ({
-                content : message.content ,
-                sent_at : message.sent_at ,
-                sent_by : message.sender.username ,
-                sent_to : message.receiver.username , 
-            })))
+            const hasMore = messages.length > limit;
+            const chunk = hasMore ? messages.slice(0, limit) : messages;
+            const nextCursor = hasMore && chunk.length > 0 ? chunk[chunk.length - 1].sent_at.toISOString() : null;
+
+            // Reverse chunk to return in ascending chronological order
+            chunk.reverse();
+
+            socket.emit('group_chat' , {
+                roomname: member.room.roomname,
+                messages: chunk.map(message => ({
+                    id : message.id,
+                    type : message.type,
+                    target_mode : message.target_mode,
+                    target_users : message.target_users,
+                    content : message.content ,
+                    sent_at : message.sent_at.toISOString() ,
+                    sent_by : message.user?.username ?? (message.type === 'system' ? 'system' : 'Unknown') ,
+                    sent_to : member.room.roomname 
+                })),
+                hasMore,
+                nextCursor,
+                isInitial: !cursorDate
+            })
 
         } catch (error : any) {
-            console.log(error.message)
+            console.error("get_message_of_room error:", error)
             socket.emit('error' , {message : "Failed to fetch messages"})
         }
     })
-
 }
+
+
+

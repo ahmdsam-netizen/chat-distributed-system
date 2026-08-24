@@ -3,15 +3,19 @@ import prisma from "./prisma";
 import { subscribeToChannel } from "@/chatHandler";
 
 export async function syncUserRoom(socket : Socket){
-    const user = await prisma.user.findFirst({
-        where : { id : socket.data.userId } ,
-        include : {rooms : true}
+    if (!socket.data.joinedRooms) {
+        socket.data.joinedRooms = new Set<string>();
+    }
+
+    const memberships = await prisma.roomMember.findMany({
+        where : { user_id : socket.data.userId } ,
+        include : { room : true }
     })
 
-    if(!user) return null
-
-    for (const room of user.rooms) {
-        socket.join(room.id)
-        await subscribeToChannel(`room:${room.id}`)
+    for (const membership of memberships) {
+        socket.join(membership.room.id)
+        socket.data.joinedRooms.add(membership.room.id)
+        await subscribeToChannel(`room:${membership.room.id}`)
     }
 }
+
