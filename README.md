@@ -1,4 +1,4 @@
-# Ripple
+# chat-distributed-system
 
 A modern, high-performance, horizontally scalable real-time chat application built with **React 19**, **Node.js / Express**, **Socket.io**, **Prisma 7 (PostgreSQL)**, and **Redis Pub/Sub**.
 
