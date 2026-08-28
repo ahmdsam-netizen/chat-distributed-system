@@ -19,6 +19,7 @@ Ripple enables multi-room messaging, real-time typing indicators, active presenc
 - **Safe Cursor-Based Pagination**: Fetch message history backward with cursor limits, ensuring new members only see messages sent after their join timestamp.
 - **Auto-Reconnect & State Recovery**: Automatic room resubscription and channel synchronization on socket reconnects.
 - **Cookie-Based JWT Authentication**: Secure HTTP-only cookies, password hashing with bcrypt, and socket authentication middleware.
+- **Nginx Reverse Proxy & Load Balancer**: All client traffic enters through a single Nginx gateway (port 8080) which distributes requests across backend instances using `least_conn`. Backends are not directly exposed to the host.
 
 ---
 
@@ -32,28 +33,34 @@ flowchart TD
         UserC["User C (Client 3)"]
     end
 
+    Nginx["Nginx Reverse Proxy and Load Balancer (Port 8080)"]
+
     subgraph BackendCluster["Horizontally Scaled Backend Cluster"]
-        Node1["Node.js Instance 1 (Port 3000)"]
-        Node2["Node.js Instance 2 (Port 3001)"]
-        Node3["Node.js Instance 3 (Port 3002)"]
+        Node1["Node.js Instance 1 (app1:3000)"]
+        Node2["Node.js Instance 2 (app2:3000)"]
+        Node3["Node.js Instance 3 (app3:3000)"]
     end
 
-    subgraph Infrastructure["Shared State & Persistence"]
+    subgraph Infrastructure["Shared State and Persistence"]
         Redis["Redis Pub/Sub (Channel: room:roomId)"]
         Postgres[("PostgreSQL Database (Prisma ORM)")]
     end
 
-    UserA <-->|"WebSocket"| Node1
-    UserB <-->|"WebSocket"| Node2
-    UserC <-->|"WebSocket"| Node3
+    UserA -->|"HTTP / WebSocket"| Nginx
+    UserB -->|"HTTP / WebSocket"| Nginx
+    UserC -->|"HTTP / WebSocket"| Nginx
+
+    Nginx -->|"least_conn load balance"| Node1
+    Nginx -->|"least_conn load balance"| Node2
+    Nginx -->|"least_conn load balance"| Node3
 
     Node1 <-->|"Pub / Sub"| Redis
     Node2 <-->|"Pub / Sub"| Redis
     Node3 <-->|"Pub / Sub"| Redis
 
-    Node1 -->|"Persist & Query"| Postgres
-    Node2 -->|"Persist & Query"| Postgres
-    Node3 -->|"Persist & Query"| Postgres
+    Node1 -->|"Persist and Query"| Postgres
+    Node2 -->|"Persist and Query"| Postgres
+    Node3 -->|"Persist and Query"| Postgres
 ```
 
 ---
@@ -110,8 +117,11 @@ ripple/
 │   ├── tsconfig.json               # Frontend TypeScript config
 │   └── package.json
 │
-├── docker-compose.yml              # Single instance stack (App + Postgres + Redis)
-├── docker-compose-multiple.yml     # Multi-instance cluster (3 Apps + Postgres + Redis)
+├── nginx/                          # Nginx reverse proxy & load balancer
+│   ├── Dockerfile                  # Builds nginx:alpine image with custom config baked in
+│   └── nginx.conf                  # Upstream pool (app1/app2/app3) & WebSocket proxy config
+├── docker-compose.yml              # Full stack with Nginx + 3 backends + Postgres + Redis
+├── docker-compose-multiple.yml     # Alias for multi-instance cluster (same Nginx config)
 ├── package.json                    # Root npm workspaces orchestrator
 └── README.md
 ```
@@ -147,7 +157,7 @@ NODE_ENV=development
 DATABASE_URL=postgresql://ripple:ripplepassword@localhost:5432/ripple
 REDIS_URL=redis://localhost:6379
 JWT_SECRET=your-super-secret-jwt-key
-ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
+ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```
 
 #### Frontend (`frontend/.env`):
@@ -177,8 +187,10 @@ npm run dev
 
 | Service | URL | Description |
 | :--- | :--- | :--- |
-| **Frontend** | [http://localhost:5173](http://localhost:5173) | React 19 Client SPA |
-| **Backend API** | [http://localhost:3000](http://localhost:3000) | REST Endpoints & WebSockets |
+| **Frontend** | [http://localhost:5173](http://localhost:5173) | React 19 Client SPA (Vite dev server) |
+| **Backend API** | [http://localhost:3000](http://localhost:3000) | REST Endpoints & WebSockets (direct, no Nginx in local dev) |
+
+> **Note:** Nginx is only active in Docker (`docker compose up`). In local development (`npm run dev`), Vite's built-in proxy handles forwarding `/api` and `/socket.io` requests directly to the backend on `port 3000`.
 
 Or run services individually:
 - `npm run dev:backend` (runs only `backend`)
@@ -188,17 +200,30 @@ Or run services individually:
 
 ## Docker Deployment
 
-### Option A: Standard Single Instance
-Runs PostgreSQL, Redis, backend, and frontend containers:
+Both compose files now include **Nginx** as the single public entry point. Nginx listens on `port 8080` and load-balances traffic across three backend instances (`app1`, `app2`, `app3`) using the `least_conn` strategy. Backends are not directly exposed to the host — only Nginx is.
+
+### Port Map
+
+| Service | Host Port | Description |
+| :--- | :--- | :--- |
+| **Frontend** | `5173` | React 19 SPA (Vite dev server) |
+| **Nginx** | `8080` | Single entry point for all API & WebSocket traffic |
+| **PostgreSQL** | `5432` | Database (configurable via `DB_PORT`) |
+| **Redis** | `6379` | Pub/Sub broker (configurable via `REDIS_PORT`) |
+
+### Option A: `docker-compose.yml` — Full Stack
+Starts everything in one command: **Nginx + 3 backend instances + PostgreSQL + Redis + Frontend**.
 ```bash
 docker compose up --build
 ```
 
-### Option B: Multi-Instance Distributed Cluster
-Simulates 3 backend instances (`app1:3000`, `app2:3001`, `app3:3002`) connected to a shared PostgreSQL database and Redis Pub/Sub cluster:
+### Option B: `docker-compose-multiple.yml` — Backends Only (no frontend)
+Starts only the infrastructure: **Nginx + 3 backend instances + PostgreSQL + Redis**. Use this when you want to run the frontend separately (e.g. `npm run dev:frontend`).
 ```bash
 docker compose -f docker-compose-multiple.yml up --build
 ```
+
+> **How it works inside Docker:** The frontend container sets `VITE_BACKEND_HOST=nginx` and `VITE_BACKEND_PORT=80`. Vite's proxy forwards all `/api` and `/socket.io` requests to the Nginx container, which then load-balances them across `app1`, `app2`, and `app3` using the `least_conn` strategy.
 
 ---
 

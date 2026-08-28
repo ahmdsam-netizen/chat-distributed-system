@@ -1,7 +1,23 @@
 # to run this file -- docker compose -f docker-compose-multiple.yml up
 
 services:
-  app1: 
+
+  # --- NGINX LOAD BALANCER ---
+  nginx:
+    build:
+      context: ./nginx      # Build from nginx/Dockerfile (config is baked into the image)
+      dockerfile: Dockerfile
+    container_name: ripple-nginx
+    ports:
+      - "8080:80"
+    depends_on:
+      - app1
+      - app2
+      - app3
+    restart: unless-stopped
+
+  # --- BACKEND INSTANCES ---
+  app1:
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -14,9 +30,9 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
       REDIS_URL: redis://pub-sub:6379
-      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:3001,http://localhost:3002
-    ports:
-      - 3000:3000
+      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    expose:
+      - "3000"
     depends_on:
       db:
         condition: service_healthy
@@ -36,9 +52,9 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
       REDIS_URL: redis://pub-sub:6379
-      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:3001,http://localhost:3002
-    ports:
-      - 3001:3000
+      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    expose:
+      - "3000"
     depends_on:
       db:
         condition: service_healthy
@@ -58,16 +74,17 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
       REDIS_URL: redis://pub-sub:6379
-      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:3001,http://localhost:3002
-    ports:
-      - 3002:3000
+      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    expose:
+      - "3000"
     depends_on:
       db:
         condition: service_healthy
       pub-sub:
         condition: service_healthy
 
-  db: 
+  # --- DATABASE ---
+  db:
     image: postgres:alpine
     container_name: ripple-database
     restart: always
@@ -78,7 +95,7 @@ services:
     ports:
       - ${DB_PORT:-5432}:5432
     volumes:
-      - postgres-data:/var/lib/postgresql
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
@@ -86,10 +103,11 @@ services:
       retries: 5
       start_period: 10s
 
+  # --- REDIS PUB/SUB ---
   pub-sub:
     image: redis:latest
     container_name: ripple-pub-sub
-    restart:  always
+    restart: always
     ports:
       - ${REDIS_PORT:-6379}:6379
     healthcheck:
