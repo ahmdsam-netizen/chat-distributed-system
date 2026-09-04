@@ -24,7 +24,7 @@ dist/
 /frontend/dist/
 /client/dist/
 /.next/
-/backend/generated/
+services/*/generated/
 generated/
 
 

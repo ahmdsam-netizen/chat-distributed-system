@@ -1,6 +1,6 @@
 # chat-distributed-system
 
-A modern, high-performance, horizontally scalable real-time chat application built with **React 19**, **Node.js / Express**, **Socket.io**, **Prisma 7 (PostgreSQL)**, and **Redis Pub/Sub**.
+A modern, high-performance, horizontally scalable real-time chat application built with **React 19**, **Node.js / Express**, **Socket.io**, **Prisma 7 (PostgreSQL)**, **Redis Pub/Sub**, and **Nginx Load Balancers** in a **Distributed Microservices Architecture**.
 
 Ripple enables multi-room messaging, real-time typing indicators, active presence, backward cursor pagination, and **granular audience targeting (in-room whispers and member exclusions)** across distributed multi-instance clusters.
 
@@ -8,18 +8,25 @@ Ripple enables multi-room messaging, real-time typing indicators, active presenc
 
 ## Features & Highlights
 
-- **Decoupled Architecture**: Independent frontend and backend workspaces managed with npm workspaces for seamless standalone deployments.
+- **Microservices Decomposition**: Decoupled into specialized services:
+  - **Auth Service**: Dedicated user authentication, password hashing, and cookie JWT management.
+  - **Distributed Gateway Layer**: Horizontally scaled WebSocket connection managers with dynamic Redis Pub/Sub subscription ref-counting.
+  - **Internal Chat Load Balancer**: Internal Nginx balancing internal RPC requests across Chat Service instances.
+  - **Horizontally Scaled Chat Cluster**: Stateless chat domain logic, room management, message persistence, and real-time event broadcasting.
+  - **Edge Nginx Reverse Proxy**: Single public entry point (`port 8080`) that transparently distributes client WebSockets across Gateways using `least_conn` and routes `/api/auth/*` directly to the Auth Service. Users never have to manually select a gateway.
 - **Targeted In-Room Whispers & Audience Control**:
   - Broadcast to everyone (`to : all`)
   - Whisper to specific members (`to : @user` or multiple users)
   - Selective exclusion (`except : @user` or multiple users)
   - Dynamic badge indicators and hover tooltips for message visibility
   - Strict server-side security: Excluded users never receive private payloads via WebSockets or historical database queries.
-- **Horizontal Scalability with Redis Pub/Sub**: Deploy across multiple backend instances with synchronized message delivery and room management.
+- **Horizontal Scalability with Redis Pub/Sub (M:N Architecture)**:
+  - Chat servers publish events to Redis room channels (`room:roomId`).
+  - Gateways subscribe to channels only when local clients are present.
+  - Redis delivers messages to all relevant gateways, which deliver down to local client sockets.
 - **Safe Cursor-Based Pagination**: Fetch message history backward with cursor limits, ensuring new members only see messages sent after their join timestamp.
 - **Auto-Reconnect & State Recovery**: Automatic room resubscription and channel synchronization on socket reconnects.
 - **Cookie-Based JWT Authentication**: Secure HTTP-only cookies, password hashing with bcrypt, and socket authentication middleware.
-- **Nginx Reverse Proxy & Load Balancer**: All client traffic enters through a single Nginx gateway (port 8080) which distributes requests across backend instances using `least_conn`. Backends are not directly exposed to the host.
 
 ---
 
@@ -28,39 +35,52 @@ Ripple enables multi-room messaging, real-time typing indicators, active presenc
 ```mermaid
 flowchart TD
     subgraph Clients["Clients (React 19 + Tailwind CSS 4)"]
-        UserA["User A (Client 1)"]
-        UserB["User B (Client 2)"]
-        UserC["User C (Client 3)"]
+        UserA["User A (Browser 1)"]
+        UserB["User B (Browser 2)"]
     end
 
-    Nginx["Nginx Reverse Proxy and Load Balancer (Port 8080)"]
+    EdgeNginx["Edge Nginx Load Balancer (Port 8080)"]
 
-    subgraph BackendCluster["Horizontally Scaled Backend Cluster"]
-        Node1["Node.js Instance 1 (app1:3000)"]
-        Node2["Node.js Instance 2 (app2:3000)"]
-        Node3["Node.js Instance 3 (app3:3000)"]
+    subgraph Gateways["Distributed Gateway Layer (Connection Sockets)"]
+        GW1["Gateway 1 (gateway1:3000)"]
+        GW2["Gateway 2 (gateway2:3000)"]
     end
 
-    subgraph Infrastructure["Shared State and Persistence"]
+    AuthSvc["Auth Service (auth-service:4000)"]
+    ChatLB["Internal Chat LB (chat-lb:5000)"]
+
+    subgraph ChatCluster["Horizontally Scaled Chat Cluster"]
+        Chat1["Chat Service 1 (chat1:5000)"]
+        Chat2["Chat Service 2 (chat2:5000)"]
+    end
+
+    subgraph Infrastructure["Shared State & Pub/Sub"]
         Redis["Redis Pub/Sub (Channel: room:roomId)"]
         Postgres[("PostgreSQL Database (Prisma ORM)")]
     end
 
-    UserA -->|"HTTP / WebSocket"| Nginx
-    UserB -->|"HTTP / WebSocket"| Nginx
-    UserC -->|"HTTP / WebSocket"| Nginx
+    UserA -->|"HTTP / WebSocket"| EdgeNginx
+    UserB -->|"HTTP / WebSocket"| EdgeNginx
 
-    Nginx -->|"least_conn load balance"| Node1
-    Nginx -->|"least_conn load balance"| Node2
-    Nginx -->|"least_conn load balance"| Node3
+    EdgeNginx -->|"/api/auth/*"| AuthSvc
+    EdgeNginx -->|"/socket.io/* (least_conn)"| GW1
+    EdgeNginx -->|"/socket.io/* (least_conn)"| GW2
 
-    Node1 <-->|"Pub / Sub"| Redis
-    Node2 <-->|"Pub / Sub"| Redis
-    Node3 <-->|"Pub / Sub"| Redis
+    GW1 -->|"HTTP RPC (least_conn)"| ChatLB
+    GW2 -->|"HTTP RPC (least_conn)"| ChatLB
 
-    Node1 -->|"Persist and Query"| Postgres
-    Node2 -->|"Persist and Query"| Postgres
-    Node3 -->|"Persist and Query"| Postgres
+    ChatLB --> Chat1
+    ChatLB --> Chat2
+
+    AuthSvc -->|"User Accounts"| Postgres
+    Chat1 -->|"Rooms & Messages"| Postgres
+    Chat2 -->|"Rooms & Messages"| Postgres
+
+    Chat1 -->|"Publish Events"| Redis
+    Chat2 -->|"Publish Events"| Redis
+
+    Redis -.->|"Subscribe Broadcasts"| GW1
+    Redis -.->|"Subscribe Broadcasts"| GW2
 ```
 
 ---
@@ -69,60 +89,59 @@ flowchart TD
 
 ```text
 ripple/
-├── backend/                        # Standalone Backend Service
-│   ├── server.ts                   # Express & Socket.io entry point
-│   ├── chatHandler.ts              # Redis publisher/subscriber connection & routing
-│   ├── redisClient.ts              # Redis client instances
-│   ├── server/
-│   │   ├── auth.ts                 # JWT signing, cookie verification & auth middleware
-│   │   └── routes/auth.ts          # /api/auth/signup, /signin, /signout, /me routes
-│   ├── socket/
-│   │   ├── index.ts                # Socket auth & connection handler
-│   │   └── handlers/               # Event handlers (rooms, messages, pub/sub)
-│   │       ├── messageHandler.ts   # Chat messages, typing, cursor pagination
-│   │       ├── roomHandler.ts      # Room creation, joining, searching, rosters
-│   │       └── pubsubEvents/       # Redis Pub/Sub event broadcasting logic
-│   ├── lib/
-│   │   ├── prisma.ts               # Prisma client singleton (pg adapter)
-│   │   ├── reconnect.ts            # Socket reconnection sync logic
-│   │   └── parseCookies.ts         # Raw cookie parser utility
-│   ├── prisma/
-│   │   ├── schema.prisma           # Database schema definition
-│   │   └── migrations/             # PostgreSQL migration files
-│   ├── prisma.config.ts            # Prisma 7 configuration
-│   ├── Dockerfile                  # Production container definition
-│   ├── tsconfig.json               # Backend TypeScript config
-│   └── package.json
+├── services/
+│   ├── auth/                           # Dedicated Authentication Service
+│   │   ├── src/
+│   │   │   ├── server.ts               # Express auth server (port 4000)
+│   │   │   ├── routes/auth.ts          # /api/auth/signup, /signin, /signout, /me
+│   │   │   ├── lib/auth.ts             # JWT signing, cookie verification & middleware
+│   │   │   └── lib/prisma.ts           # Prisma client for User model
+│   │   ├── prisma/schema.prisma        # User schema
+│   │   └── Dockerfile
+│   │
+│   ├── gateway/                        # Distributed Gateway Service (WebSocket Edge)
+│   │   ├── src/
+│   │   │   ├── server.ts               # Socket.io server (port 3000)
+│   │   │   ├── socket/
+│   │   │   │   ├── index.ts            # Connection auth & room sync lifecycle
+│   │   │   │   └── handlers.ts         # Socket event dispatchers calling chat-lb
+│   │   │   ├── lib/
+│   │   │   │   ├── chatClient.ts       # Forwarding HTTP client to chat-lb
+│   │   │   │   ├── redisSubscriber.ts  # Ref-counted Redis Pub/Sub subscriptions
+│   │   │   │   └── eventRouter.ts      # Delivers Redis events to local sockets
+│   │   │   └── auth/tokenVerifier.ts   # Local JWT verification & cookie parsing
+│   │   └── Dockerfile
+│   │
+│   └── chat/                           # Horizontally Scaled Chat / Room Service
+│       ├── src/
+│       │   ├── server.ts               # Express server (port 5000)
+│       │   ├── routes/
+│       │   │   ├── roomRoutes.ts       # Room CRUD & member routes
+│       │   │   └── messageRoutes.ts    # Send message, typing, cursor pagination
+│       │   ├── logic/
+│       │   │   ├── roomLogic.ts        # Room business logic & Redis publish
+│       │   │   └── messageLogic.ts     # Message validation, DB persistence & Redis publish
+│       │   ├── lib/
+│       │   │   ├── redisPublisher.ts   # Redis publisher client
+│       │   │   └── prisma.ts           # Prisma client for Room & Message models
+│       │   ├── prisma/
+│       │   │   ├── schema.prisma       # Room, RoomMember, RoomMessage schema
+│       │   │   └── migrations/         # PostgreSQL migration files
+│       │   └── Dockerfile
+│       └── Dockerfile
 │
-├── frontend/                       # Standalone Frontend SPA
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── chat/ChatApp.tsx    # Real-time chat workspace & audience selector
-│   │   │   └── ProtectedRoute.tsx  # Route guard for authenticated users
-│   │   ├── contexts/
-│   │   │   └── AuthContext.tsx     # Global user session & auth state
-│   │   ├── pages/
-│   │   │   └── AuthPages.tsx       # Sign In & Sign Up interfaces
-│   │   ├── lib/
-│   │   │   ├── api.ts              # REST API client
-│   │   │   ├── socket.ts           # Socket.io connection manager
-│   │   │   └── socket-types.ts     # Frontend TypeScript types & interfaces
-│   │   ├── styles.css              # Tailwind CSS 4 setup & glassmorphism theme
-│   │   ├── main.tsx                # React Router & application mount point
-│   │   └── vite-env.d.ts
-│   ├── index.html                  # HTML entry point
-│   ├── vite.config.ts              # Vite config & dev proxy
-│   ├── postcss.config.mjs          # PostCSS configuration
-│   ├── Dockerfile                  # Frontend container definition
-│   ├── tsconfig.json               # Frontend TypeScript config
-│   └── package.json
+├── nginx/
+│   ├── edge/                           # Edge Reverse Proxy & Load Balancer (port 8080)
+│   │   ├── nginx.conf                  # Routes /api/auth to auth-service & /socket.io to gateways
+│   │   └── Dockerfile
+│   └── chat-lb/                        # Internal Chat Load Balancer (port 5000)
+│       ├── nginx.conf                  # Balances requests across chat1 and chat2
+│       └── Dockerfile
 │
-├── nginx/                          # Nginx reverse proxy & load balancer
-│   ├── Dockerfile                  # Builds nginx:alpine image with custom config baked in
-│   └── nginx.conf                  # Upstream pool (app1/app2/app3) & WebSocket proxy config
-├── docker-compose.yml              # Full stack with Nginx + 3 backends + Postgres + Redis
-├── docker-compose-multiple.yml     # Alias for multi-instance cluster (same Nginx config)
-├── package.json                    # Root npm workspaces orchestrator
+├── frontend/                           # Standalone React 19 SPA
+├── docker-compose.yml                  # Full stack microservices cluster
+├── docker-compose-multiple.yml         # Multi-service stack (with frontend)
+├── package.json                        # Root npm workspaces orchestrator
 └── README.md
 ```
 
@@ -150,120 +169,85 @@ npm install
 
 ### 2. Configure Environment Variables
 
-#### Backend (`backend/.env`):
+Create `.env` in the root directory:
 ```env
 PORT=3000
 NODE_ENV=development
+DB_USER=ripple
+DB_PASSWORD=ripplepassword
+DB_NAME=ripple
 DATABASE_URL=postgresql://ripple:ripplepassword@localhost:5432/ripple
 REDIS_URL=redis://localhost:6379
 JWT_SECRET=your-super-secret-jwt-key
-ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-```
-
-#### Frontend (`frontend/.env`):
-```env
-# Leave blank during local development to leverage Vite proxy
-VITE_API_URL=
-VITE_SOCKET_URL=
+ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080
 ```
 
 ---
 
 ### 3. Database Setup & Migrations
-Run Prisma migrations to initialize your PostgreSQL schema:
+Run Prisma migrations using the Chat service:
 ```bash
-cd backend
+cd services/chat
 npx prisma migrate dev
-cd ..
+cd ../..
+```
+
+Generate Prisma clients for Auth and Chat services:
+```bash
+npm run build --workspace=services/auth
+npm run build --workspace=services/chat
 ```
 
 ---
 
 ### 4. Start Development Servers
-From the root directory, launch both backend and frontend concurrently:
+From the root directory, launch all microservices and the frontend concurrently:
 ```bash
 npm run dev
 ```
 
-| Service | URL | Description |
-| :--- | :--- | :--- |
-| **Frontend** | [http://localhost:5173](http://localhost:5173) | React 19 Client SPA (Vite dev server) |
-| **Backend API** | [http://localhost:3000](http://localhost:3000) | REST Endpoints & WebSockets (direct, no Nginx in local dev) |
-
-> **Note:** Nginx is only active in Docker (`docker compose up`). In local development (`npm run dev`), Vite's built-in proxy handles forwarding `/api` and `/socket.io` requests directly to the backend on `port 3000`.
-
 Or run services individually:
-- `npm run dev:backend` (runs only `backend`)
-- `npm run dev:frontend` (runs only `frontend`)
+- `npm run dev:auth` (Auth Service on port 4000)
+- `npm run dev:chat` (Chat Service on port 5000)
+- `npm run dev:gateway` (Gateway Service on port 3000)
+- `npm run dev:frontend` (React 19 Frontend on port 5173)
 
 ---
 
 ## Docker Deployment
 
-Both compose files now include **Nginx** as the single public entry point. Nginx listens on `port 8080` and load-balances traffic across three backend instances (`app1`, `app2`, `app3`) using the `least_conn` strategy. Backends are not directly exposed to the host — only Nginx is.
+The entire microservices stack is orchestrated via Docker Compose. **Edge Nginx** serves as the public entry point on `port 8080`, transparently load balancing WebSocket traffic across Gateways and routing auth requests.
 
 ### Port Map
 
-| Service | Host Port | Description |
-| :--- | :--- | :--- |
-| **Frontend** | `5173` | React 19 SPA (Vite dev server) |
-| **Nginx** | `8080` | Single entry point for all API & WebSocket traffic |
-| **PostgreSQL** | `5432` | Database (configurable via `DB_PORT`) |
-| **Redis** | `6379` | Pub/Sub broker (configurable via `REDIS_PORT`) |
+| Service | Host Port | Internal Port | Description |
+| :--- | :--- | :--- | :--- |
+| **Edge Nginx** | `8080` | `80` | Single public entry point for all API & WebSocket traffic |
+| **Frontend** | `5173` | `5173` | React 19 Client SPA (Vite dev server) |
+| **Auth Service** | — | `4000` | User authentication & credential management |
+| **Gateway 1 & 2** | — | `3000` | WebSocket connection edge servers |
+| **Chat LB** | — | `5000` | Internal load balancer for Chat cluster |
+| **Chat 1 & 2** | — | `5000` | Chat domain logic & room management |
+| **PostgreSQL** | `5432` | `5432` | Primary database (`postgres:16-alpine`) |
+| **Redis** | `6379` | `6379` | Pub/Sub message broker |
 
-### Option A: `docker-compose.yml` — Full Stack
-Starts everything in one command: **Nginx + 3 backend instances + PostgreSQL + Redis + Frontend**.
+### Option A: `docker-compose.yml`
+Starts the complete cluster:
 ```bash
 docker compose up --build
 ```
 
-### Option B: `docker-compose-multiple.yml` — Backends Only (no frontend)
-Starts only the infrastructure: **Nginx + 3 backend instances + PostgreSQL + Redis**. Use this when you want to run the frontend separately (e.g. `npm run dev:frontend`).
+### Option B: `docker-compose-multiple.yml`
+Alternative compose configuration:
 ```bash
 docker compose -f docker-compose-multiple.yml up --build
 ```
 
-> **How it works inside Docker:** The frontend container sets `VITE_BACKEND_HOST=nginx` and `VITE_BACKEND_PORT=80`. Vite's proxy forwards all `/api` and `/socket.io` requests to the Nginx container, which then load-balances them across `app1`, `app2`, and `app3` using the `least_conn` strategy.
-
----
-
-## Standalone Production Deployment
-
-Because `backend/` and `frontend/` are completely decoupled, they can be deployed independently to different cloud providers.
-
-### Deploying the Backend (Render, Railway, Fly.io, AWS, DigitalOcean)
-Deploy only the `backend/` directory:
-
-1. **Environment Variables**:
-   - `PORT`: `3000` (or assigned by provider)
-   - `NODE_ENV`: `production`
-   - `DATABASE_URL`: Managed PostgreSQL connection string
-   - `REDIS_URL`: Managed Redis connection string (e.g. Upstash, Redis Cloud)
-   - `JWT_SECRET`: Strong secret key
-   - `ALLOWED_ORIGINS`: `https://your-frontend-domain.vercel.app`
-2. **Build Command**:
-   ```bash
-   npm ci && npm run build
-   ```
-3. **Start Command**:
-   ```bash
-   npx prisma migrate deploy && npm start
-   ```
-
----
-
-### Deploying the Frontend (Vercel, Netlify, Cloudflare Pages)
-Deploy only the `frontend/` directory:
-
-1. **Environment Variables**:
-   - `VITE_API_URL`: `https://your-backend-api.com`
-   - `VITE_SOCKET_URL`: `https://your-backend-api.com`
-2. **Build Command**:
-   ```bash
-   npm run build
-   ```
-3. **Output Directory**:
-   `dist`
+> **Clean start after volume changes:** If resetting the database volume, run:
+> ```bash
+> docker compose down -v
+> docker compose up --build
+> ```
 
 ---
 
@@ -295,9 +279,12 @@ Sockets authenticate via HTTP-only cookie during handshake or via an explicit `a
 
 | Event (Server &rarr; Client) | Payload | Description |
 | :--- | :--- | :--- |
-| `room_created` | `{ roomname: string, description: string }` | Room creation success |
+| `room_created` | `{ roomname: string }` | Room creation success |
+| `joined_room` | `{ roomname: string }` | Room join success |
+| `left_room` | `{ roomname: string }` | Room leave success |
 | `filter_rooms` | `FilterRoom[]` | Search results with member counts |
 | `room_members` | `{ roomname: string, members: Member[] }` | Room member roster |
+| `room_deleted` | `{ roomname: string, roomId: string }` | Broadcast when empty room is deleted |
 
 ---
 
@@ -311,31 +298,20 @@ Sockets authenticate via HTTP-only cookie during handshake or via an explicit `a
 
 | Event (Server &rarr; Client) | Payload | Description |
 | :--- | :--- | :--- |
-| `message_in_room` | `{ id: string, content: string, sent_at: string, sent_by: string, sent_to: string, target_mode: string, target_users: string[] }` | Incoming real-time message |
+| `chat` | `{ id: string, content: string, sent_at: string, sent_by: string, sent_to: string, target_mode: string, target_users: string[] }` | Incoming real-time message |
 | `group_chat` | `{ roomname: string, messages: Message[], hasMore: boolean, nextCursor: string \| null, isInitial: boolean }` | Paginated message chunk response |
-| `typing_in_room` | `{ username: string, roomname: string }` | Real-time typing notification |
+| `typing` | `{ username: string, roomname: string }` | Real-time typing notification |
+| `error` | `{ message: string }` | Operation error notification |
 
 ---
 
 ## Available NPM Scripts
 
 ### Root Monorepo
-- `npm run dev`: Run both backend and frontend concurrently
-- `npm run dev:backend`: Run backend only
-- `npm run dev:frontend`: Run frontend only
-- `npm run build`: Build both backend and frontend for production
-- `npm run lint`: Type-check all workspaces
-
-### Backend Workspace (`cd backend`)
-- `npm run dev`: Run server via `tsx`
-- `npm run build`: Generate Prisma client
-- `npm run start`: Run production server
-- `npm run db:migrate`: Run Prisma migrations for development
-- `npm run db:deploy`: Apply migrations in production
-
-### Frontend Workspace (`cd frontend`)
-- `npm run dev`: Start Vite development server
-- `npm run build`: Type-check and compile Vite bundle into `dist/`
-- `npm run preview`: Preview production build locally
-
----
+- `npm run dev`: Run all microservices (`auth`, `chat`, `gateway`) and `frontend` concurrently
+- `npm run dev:auth`: Run Auth Service only
+- `npm run dev:chat`: Run Chat Service only
+- `npm run dev:gateway`: Run Gateway Service only
+- `npm run dev:frontend`: Run React Frontend only
+- `npm run build`: Build all workspaces for production
+- `npm run lint`: Type-check all workspaces with TypeScript

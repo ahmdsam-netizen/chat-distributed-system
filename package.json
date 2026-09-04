@@ -3,16 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "workspaces": [
-    "backend",
+    "services/*",
     "frontend"
   ],
   "scripts": {
-    "dev": "concurrently -n backend,frontend -c blue,magenta \"npm run dev --workspace=backend\" \"npm run dev --workspace=frontend\"",
-    "dev:backend": "npm run dev --workspace=backend",
+    "dev": "concurrently -n auth,chat,gateway,frontend -c green,red,yellow,magenta \"npm run dev:auth\" \"npm run dev:chat\" \"npm run dev:gateway\" \"npm run dev:frontend\"",
+    "dev:auth": "npm run dev --workspace=services/auth",
+    "dev:chat": "npm run dev --workspace=services/chat",
+    "dev:gateway": "npm run dev --workspace=services/gateway",
     "dev:frontend": "npm run dev --workspace=frontend",
-    "build": "npm run build --workspace=backend && npm run build --workspace=frontend",
-    "build:backend": "npm run build --workspace=backend",
-    "build:frontend": "npm run build --workspace=frontend",
+    "build": "npm run build --workspaces",
     "lint": "npm run lint --workspaces"
   },
   "devDependencies": {
