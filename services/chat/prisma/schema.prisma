@@ -1,0 +1,56 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User { 
+  id          String        @id @default(cuid()) 
+  email       String        @unique
+  password    String
+  username    String        @unique
+  created_at  DateTime      @default(now())
+  memberships RoomMember[]
+  messages    RoomMessage[]
+}
+
+model Room {
+  id          String        @id @default(cuid()) 
+  roomname    String        @unique
+  description String?
+  created_by  String
+  created_at  DateTime      @default(now())
+  messages    RoomMessage[]
+  members     RoomMember[]
+}
+
+model RoomMember {
+  id        String   @id @default(cuid())
+  user_id   String
+  user      User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  room_id   String
+  room      Room     @relation(fields: [room_id], references: [id], onDelete: Cascade)
+  joined_at DateTime @default(now())
+
+  @@unique([user_id, room_id])
+  @@index([room_id, joined_at])
+  @@index([user_id])
+}
+
+model RoomMessage { 
+  id           String     @id @default(cuid()) 
+  content      String
+  type         String     @default("chat")
+  target_mode  String     @default("all")
+  target_users String[]   @default([])
+  sent_at      DateTime   @default(now())
+  room_id      String
+  room         Room       @relation(fields: [room_id], references: [id], onDelete: Cascade)
+  user_id      String?
+  user         User?      @relation(fields: [user_id], references: [id], onDelete: SetNull)
+
+  @@index([room_id, sent_at])
+}

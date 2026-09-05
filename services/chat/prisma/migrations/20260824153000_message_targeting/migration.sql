@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "RoomMessage" ADD COLUMN IF NOT EXISTS "target_mode" TEXT NOT NULL DEFAULT 'all';
+ALTER TABLE "RoomMessage" ADD COLUMN IF NOT EXISTS "target_users" TEXT[] DEFAULT ARRAY[]::TEXT[];
