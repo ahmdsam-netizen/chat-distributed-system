@@ -10,8 +10,8 @@ services:
     ports:
       - "8080:80"
     depends_on:
-      - gateway1
-      - gateway2
+      - chat1
+      - chat2
       - auth-service
     restart: unless-stopped
 
@@ -39,71 +39,6 @@ services:
       chat1:
         condition: service_started
 
-  # --- GATEWAY INSTANCE 1 ---
-  gateway1:
-    image: ripple-gateway:latest
-    build:
-      context: ./services/gateway
-      dockerfile: Dockerfile
-    container_name: ripple-gateway1
-    env_file:
-      - .env
-    environment:
-      INSTANCE_ID: gateway1
-      PORT: 3000
-      NODE_ENV: production
-      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key}
-      REDIS_URL: redis://pub-sub:6379
-      CHAT_LB_URL: http://chat-lb:5000
-      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080
-    expose:
-      - "3000"
-    restart: unless-stopped
-    depends_on:
-      pub-sub:
-        condition: service_healthy
-      chat-lb:
-        condition: service_started
-
-  # --- GATEWAY INSTANCE 2 (Instance of same ripple-gateway image) ---
-  gateway2:
-    image: ripple-gateway:latest
-    container_name: ripple-gateway2
-    env_file:
-      - .env
-    environment:
-      INSTANCE_ID: gateway2
-      PORT: 3000
-      NODE_ENV: production
-      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key}
-      REDIS_URL: redis://pub-sub:6379
-      CHAT_LB_URL: http://chat-lb:5000
-      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080
-    expose:
-      - "3000"
-    restart: unless-stopped
-    depends_on:
-      gateway1:
-        condition: service_started
-      pub-sub:
-        condition: service_healthy
-      chat-lb:
-        condition: service_started
-
-  # --- INTERNAL CHAT LOAD BALANCER ---
-  chat-lb:
-    image: ripple-chat-lb:latest
-    build:
-      context: ./nginx/chat-lb
-      dockerfile: Dockerfile
-    container_name: ripple-chat-lb
-    expose:
-      - "5000"
-    depends_on:
-      - chat1
-      - chat2
-    restart: unless-stopped
-
   # --- CHAT SERVICE INSTANCE 1 ---
   chat1:
     image: ripple-chat:latest
@@ -119,6 +54,8 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
       REDIS_URL: redis://pub-sub:6379
+      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key}
+      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080
     expose:
       - "5000"
     restart: unless-stopped
@@ -140,6 +77,8 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
       REDIS_URL: redis://pub-sub:6379
+      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key}
+      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080
     expose:
       - "5000"
     restart: unless-stopped

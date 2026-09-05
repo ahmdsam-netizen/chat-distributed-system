@@ -146,11 +146,17 @@ export default function ChatApp() {
     socket.on("auth_error", (payload: { message?: string }) => {
       setError(payload.message ?? "Not authenticated");
       setConnected(false);
+      disconnectSocket();
+      navigate("/signin", { replace: true, state: { reason: payload.message ?? "Not authenticated" } });
     });
     socket.on("disconnect", () => setConnected(false));
     socket.on("connect_error", e => {
       setError(e.message);
       setConnected(false);
+      if (e.message === "UNAUTHENTICATED" || e.message === "INVALID_SESSION") {
+        disconnectSocket();
+        navigate("/signin", { replace: true, state: { reason: "Please sign in to access chat" } });
+      }
     });
 
     socket.on("filter_rooms", setRooms);

@@ -14,12 +14,12 @@ export async function connectRedisSubscriber(io: Server) {
   ioInstance = io;
   try {
     await subscriber.connect();
-    console.log("✅ Redis subscriber connected for Gateway");
+    console.log("Redis subscriber connected for Chat Service");
 
     // Always listen to global:rooms for system-wide room deletion notifications
     await subscribeToChannel("global:rooms");
   } catch (error: any) {
-    console.error("❌ Redis subscriber connection error:", error.message);
+    console.error("Redis subscriber connection error:", error.message);
     process.exit(1);
   }
 }
@@ -32,7 +32,7 @@ export async function subscribeToChannel(channel: string) {
       routeRedisMessage(ioInstance, message, channelName);
     });
     subscribedChannels.add(channel);
-    console.log(`[Gateway] Subscribed to Redis channel: ${channel}`);
+    console.log(`[Chat Service] Subscribed to Redis channel: ${channel}`);
   }
 
   channelRefCount.set(channel, count + 1);
@@ -45,7 +45,7 @@ export async function unsubscribeFromChannel(channel: string) {
     if (subscribedChannels.has(channel) && channel !== "global:rooms") {
       await subscriber.unsubscribe(channel);
       subscribedChannels.delete(channel);
-      console.log(`[Gateway] Unsubscribed from Redis channel: ${channel}`);
+      console.log(`[Chat Service] Unsubscribed from Redis channel: ${channel}`);
     }
     channelRefCount.delete(channel);
   } else {

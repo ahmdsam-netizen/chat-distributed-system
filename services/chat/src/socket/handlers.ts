@@ -1,5 +1,16 @@
 import { Server, Socket } from "socket.io";
-import { chatClient } from "../lib/chatClient";
+import {
+  createRoom,
+  joinRoom,
+  leaveRoom,
+  listRooms,
+  getRoomMembers,
+} from "../logic/roomLogic";
+import {
+  sendMessage,
+  sendTyping,
+  getMessages,
+} from "../logic/messageLogic";
 import { subscribeToChannel, unsubscribeFromChannel } from "../lib/redisSubscriber";
 
 export function registerSocketHandlers(_io: Server, socket: Socket) {
@@ -10,9 +21,12 @@ export function registerSocketHandlers(_io: Server, socket: Socket) {
 
   // --- ROOM HANDLERS ---
 
-  socket.on("create_room", async (data: { roomname: string; description: string }) => {
+  socket.on("create_room", async (data: { roomname: string; description?: string }) => {
     try {
-      const result = await chatClient.createRoom(user, data);
+      const result = await createRoom(user, {
+        roomname: data.roomname,
+        description: data.description ?? "",
+      });
 
       socket.join(result.roomId);
       if (!socket.data.joinedRooms) socket.data.joinedRooms = new Set<string>();
@@ -28,7 +42,7 @@ export function registerSocketHandlers(_io: Server, socket: Socket) {
 
   socket.on("join_room", async (data: { roomname: string }) => {
     try {
-      const result = await chatClient.joinRoom(user, data);
+      const result = await joinRoom(user, data);
 
       socket.join(result.roomId);
       if (!socket.data.joinedRooms) socket.data.joinedRooms = new Set<string>();
@@ -44,7 +58,7 @@ export function registerSocketHandlers(_io: Server, socket: Socket) {
 
   socket.on("leave_room", async (data: { roomname: string }) => {
     try {
-      const result = await chatClient.leaveRoom(user, data);
+      const result = await leaveRoom(user, data);
 
       socket.leave(result.roomId);
       if (socket.data.joinedRooms) {
@@ -59,9 +73,9 @@ export function registerSocketHandlers(_io: Server, socket: Socket) {
     }
   });
 
-  socket.on("list_room", async (data: { filter: string }) => {
+  socket.on("list_room", async (data: { filter?: string }) => {
     try {
-      const rooms = await chatClient.listRooms(user, data?.filter ?? "");
+      const rooms = await listRooms(user, data?.filter ?? "");
       socket.emit("filter_rooms", rooms);
     } catch (error: any) {
       console.error("list_room error:", error);
@@ -71,7 +85,7 @@ export function registerSocketHandlers(_io: Server, socket: Socket) {
 
   socket.on("get_room_members", async (data: { roomname: string }) => {
     try {
-      const result = await chatClient.getRoomMembers(user, data.roomname);
+      const result = await getRoomMembers(user, data.roomname);
       socket.emit("room_members", result);
     } catch (error: any) {
       console.error("get_room_members error:", error);
@@ -90,7 +104,7 @@ export function registerSocketHandlers(_io: Server, socket: Socket) {
       target_users?: string[];
     }) => {
       try {
-        const result = await chatClient.sendMessage(user, data);
+        const result = await sendMessage(user, data);
         if (result?.roomId && !socket.rooms.has(result.roomId)) {
           socket.join(result.roomId);
           if (!socket.data.joinedRooms) socket.data.joinedRooms = new Set<string>();
@@ -106,7 +120,7 @@ export function registerSocketHandlers(_io: Server, socket: Socket) {
 
   socket.on("typing_in_room", async (data: { roomname: string }) => {
     try {
-      await chatClient.sendTyping(user, data);
+      await sendTyping(user, data);
     } catch (error: any) {
       console.error("typing_in_room error:", error);
       socket.emit("error", { message: "Failed to emit typing" });
@@ -117,7 +131,7 @@ export function registerSocketHandlers(_io: Server, socket: Socket) {
     "get_message_of_room",
     async (data: { roomname: string; cursor?: string; limit?: number }) => {
       try {
-        const result = await chatClient.getMessages(user, data);
+        const result = await getMessages(user, data);
         socket.emit("group_chat", result);
       } catch (error: any) {
         console.error("get_message_of_room error:", error);

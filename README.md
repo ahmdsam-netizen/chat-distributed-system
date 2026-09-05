@@ -1,6 +1,6 @@
 # chat-distributed-system
 
-A modern, high-performance, horizontally scalable real-time chat application built with **React 19**, **Node.js / Express**, **Socket.io**, **Prisma 7 (PostgreSQL)**, **Redis Pub/Sub**, and **Nginx Load Balancers** in a **Distributed Microservices Architecture**.
+A modern, high-performance, horizontally scalable real-time chat application built with **React 19**, **Node.js / Express**, **Socket.io**, **Prisma 7 (PostgreSQL)**, **Redis Pub/Sub**, and **Nginx Load Balancer** in a **Distributed Microservices Architecture**.
 
 Ripple enables multi-room messaging, real-time typing indicators, active presence, backward cursor pagination, and **granular audience targeting (in-room whispers and member exclusions)** across distributed multi-instance clusters.
 
@@ -10,10 +10,8 @@ Ripple enables multi-room messaging, real-time typing indicators, active presenc
 
 - **Microservices Decomposition**: Decoupled into specialized services:
   - **Auth Service**: Dedicated user authentication, password hashing, and cookie JWT management.
-  - **Distributed Gateway Layer**: Horizontally scaled WebSocket connection managers with dynamic Redis Pub/Sub subscription ref-counting.
-  - **Internal Chat Load Balancer**: Internal Nginx balancing internal RPC requests across Chat Service instances.
-  - **Horizontally Scaled Chat Cluster**: Stateless chat domain logic, room management, message persistence, and real-time event broadcasting.
-  - **Edge Nginx Reverse Proxy**: Single public entry point (`port 8080`) that transparently distributes client WebSockets across Gateways using `least_conn` and routes `/api/auth/*` directly to the Auth Service. Users never have to manually select a gateway.
+  - **Horizontally Scaled Chat Cluster**: Direct WebSocket termination, in-memory chat domain logic, room management, message persistence, and real-time event broadcasting.
+  - **Edge Nginx Reverse Proxy**: Single public entry point (`port 8080`) that transparently distributes client WebSockets directly across the Chat Cluster using `ip_hash` (sticky sessions) and routes `/api/auth/*` directly to the Auth Service.
 - **Targeted In-Room Whispers & Audience Control**:
   - Broadcast to everyone (`to : all`)
   - Whisper to specific members (`to : @user` or multiple users)
@@ -22,11 +20,11 @@ Ripple enables multi-room messaging, real-time typing indicators, active presenc
   - Strict server-side security: Excluded users never receive private payloads via WebSockets or historical database queries.
 - **Horizontal Scalability with Redis Pub/Sub (M:N Architecture)**:
   - Chat servers publish events to Redis room channels (`room:roomId`).
-  - Gateways subscribe to channels only when local clients are present.
-  - Redis delivers messages to all relevant gateways, which deliver down to local client sockets.
+  - Chat servers subscribe to channels dynamically when local clients are present.
+  - Redis synchronizes messages across all chat instances, which deliver down to local client sockets.
 - **Safe Cursor-Based Pagination**: Fetch message history backward with cursor limits, ensuring new members only see messages sent after their join timestamp.
 - **Auto-Reconnect & State Recovery**: Automatic room resubscription and channel synchronization on socket reconnects.
-- **Cookie-Based JWT Authentication**: Secure HTTP-only cookies, password hashing with bcrypt, and socket authentication middleware.
+- **Cookie-Based JWT Authentication**: Secure HTTP-only cookies, password hashing with bcrypt, socket authentication middleware, and automatic rerouting of unauthenticated users to `/signin`.
 
 ---
 
@@ -41,13 +39,7 @@ flowchart TD
 
     EdgeNginx["Edge Nginx Load Balancer (Port 8080)"]
 
-    subgraph Gateways["Distributed Gateway Layer (Connection Sockets)"]
-        GW1["Gateway 1 (gateway1:3000)"]
-        GW2["Gateway 2 (gateway2:3000)"]
-    end
-
     AuthSvc["Auth Service (auth-service:4000)"]
-    ChatLB["Internal Chat LB (chat-lb:5000)"]
 
     subgraph ChatCluster["Horizontally Scaled Chat Cluster"]
         Chat1["Chat Service 1 (chat1:5000)"]
@@ -63,24 +55,15 @@ flowchart TD
     UserB -->|"HTTP / WebSocket"| EdgeNginx
 
     EdgeNginx -->|"/api/auth/*"| AuthSvc
-    EdgeNginx -->|"/socket.io/* (least_conn)"| GW1
-    EdgeNginx -->|"/socket.io/* (least_conn)"| GW2
-
-    GW1 -->|"HTTP RPC (least_conn)"| ChatLB
-    GW2 -->|"HTTP RPC (least_conn)"| ChatLB
-
-    ChatLB --> Chat1
-    ChatLB --> Chat2
+    EdgeNginx -->|"/socket.io/* (ip_hash)"| Chat1
+    EdgeNginx -->|"/socket.io/* (ip_hash)"| Chat2
 
     AuthSvc -->|"User Accounts"| Postgres
     Chat1 -->|"Rooms & Messages"| Postgres
     Chat2 -->|"Rooms & Messages"| Postgres
 
-    Chat1 -->|"Publish Events"| Redis
-    Chat2 -->|"Publish Events"| Redis
-
-    Redis -.->|"Subscribe Broadcasts"| GW1
-    Redis -.->|"Subscribe Broadcasts"| GW2
+    Chat1 <-->|"Publish & Subscribe"| Redis
+    Chat2 <-->|"Publish & Subscribe"| Redis
 ```
 
 ---
@@ -99,31 +82,23 @@ ripple/
 │   │   ├── prisma/schema.prisma        # User schema
 │   │   └── Dockerfile
 │   │
-│   ├── gateway/                        # Distributed Gateway Service (WebSocket Edge)
-│   │   ├── src/
-│   │   │   ├── server.ts               # Socket.io server (port 3000)
-│   │   │   ├── socket/
-│   │   │   │   ├── index.ts            # Connection auth & room sync lifecycle
-│   │   │   │   └── handlers.ts         # Socket event dispatchers calling chat-lb
-│   │   │   ├── lib/
-│   │   │   │   ├── chatClient.ts       # Forwarding HTTP client to chat-lb
-│   │   │   │   ├── redisSubscriber.ts  # Ref-counted Redis Pub/Sub subscriptions
-│   │   │   │   └── eventRouter.ts      # Delivers Redis events to local sockets
-│   │   │   └── auth/tokenVerifier.ts   # Local JWT verification & cookie parsing
-│   │   └── Dockerfile
-│   │
-│   └── chat/                           # Horizontally Scaled Chat / Room Service
+│   └── chat/                           # Horizontally Scaled Chat / WebSocket Service
 │       ├── src/
-│       │   ├── server.ts               # Express server (port 5000)
-│       │   ├── routes/
-│       │   │   ├── roomRoutes.ts       # Room CRUD & member routes
-│       │   │   └── messageRoutes.ts    # Send message, typing, cursor pagination
+│       │   ├── server.ts               # Express & Socket.io server (port 5000)
+│       │   ├── auth/
+│       │   │   └── tokenVerifier.ts    # Cookie parsing & JWT verification
+│       │   ├── socket/
+│       │   │   ├── index.ts            # Socket.io auth handshake & room sync
+│       │   │   └── handlers.ts         # In-memory event dispatchers
 │       │   ├── logic/
 │       │   │   ├── roomLogic.ts        # Room business logic & Redis publish
 │       │   │   └── messageLogic.ts     # Message validation, DB persistence & Redis publish
 │       │   ├── lib/
 │       │   │   ├── redisPublisher.ts   # Redis publisher client
+│       │   │   ├── redisSubscriber.ts  # Dynamic Redis room subscriptions
+│       │   │   ├── eventRouter.ts      # Whispers & audience targeting router
 │       │   │   └── prisma.ts           # Prisma client for Room & Message models
+│       │   ├── routes/                 # REST endpoints (rooms & messages)
 │       │   ├── prisma/
 │       │   │   ├── schema.prisma       # Room, RoomMember, RoomMessage schema
 │       │   │   └── migrations/         # PostgreSQL migration files
@@ -131,11 +106,8 @@ ripple/
 │       └── Dockerfile
 │
 ├── nginx/
-│   ├── edge/                           # Edge Reverse Proxy & Load Balancer (port 8080)
-│   │   ├── nginx.conf                  # Routes /api/auth to auth-service & /socket.io to gateways
-│   │   └── Dockerfile
-│   └── chat-lb/                        # Internal Chat Load Balancer (port 5000)
-│       ├── nginx.conf                  # Balances requests across chat1 and chat2
+│   └── edge/                           # Edge Reverse Proxy & Load Balancer (port 8080)
+│       ├── nginx.conf                  # Routes /api/auth to auth-service & /socket.io to chat cluster
 │       └── Dockerfile
 │
 ├── frontend/                           # Standalone React 19 SPA
@@ -171,7 +143,7 @@ npm install
 
 Create `.env` in the root directory:
 ```env
-PORT=3000
+PORT=5000
 NODE_ENV=development
 DB_USER=ripple
 DB_PASSWORD=ripplepassword
@@ -209,14 +181,13 @@ npm run dev
 Or run services individually:
 - `npm run dev:auth` (Auth Service on port 4000)
 - `npm run dev:chat` (Chat Service on port 5000)
-- `npm run dev:gateway` (Gateway Service on port 3000)
 - `npm run dev:frontend` (React 19 Frontend on port 5173)
 
 ---
 
 ## Docker Deployment
 
-The entire microservices stack is orchestrated via Docker Compose. **Edge Nginx** serves as the public entry point on `port 8080`, transparently load balancing WebSocket traffic across Gateways and routing auth requests.
+The entire microservices stack is orchestrated via Docker Compose. **Edge Nginx** serves as the public entry point on `port 8080`, transparently load balancing WebSocket traffic across Chat instances and routing auth requests.
 
 ### Port Map
 
@@ -225,9 +196,7 @@ The entire microservices stack is orchestrated via Docker Compose. **Edge Nginx*
 | **Edge Nginx** | `8080` | `80` | Single public entry point for all API & WebSocket traffic |
 | **Frontend** | `5173` | `5173` | React 19 Client SPA (Vite dev server) |
 | **Auth Service** | — | `4000` | User authentication & credential management |
-| **Gateway 1 & 2** | — | `3000` | WebSocket connection edge servers |
-| **Chat LB** | — | `5000` | Internal load balancer for Chat cluster |
-| **Chat 1 & 2** | — | `5000` | Chat domain logic & room management |
+| **Chat 1 & 2** | — | `5000` | Real-time WebSockets, chat domain logic & room management |
 | **PostgreSQL** | `5432` | `5432` | Primary database (`postgres:16-alpine`) |
 | **Redis** | `6379` | `6379` | Pub/Sub message broker |
 
@@ -254,11 +223,11 @@ docker compose -f docker-compose-multiple.yml up --build
 ## Socket.io API Reference
 
 ### Authentication
-Sockets authenticate via HTTP-only cookie during handshake or via an explicit `authenticate` event.
+Sockets authenticate via HTTP-only cookie during handshake. If unauthenticated, the connection is rejected with `UNAUTHENTICATED`, automatically redirecting the client to `/signin`.
 
 | Event (Client &rarr; Server) | Payload | Description |
 | :--- | :--- | :--- |
-| `authenticate` | *(None)* | Authenticates socket using session cookie |
+| `authenticate` | *(None)* | Re-authenticates socket using session cookie |
 
 | Event (Server &rarr; Client) | Payload | Description |
 | :--- | :--- | :--- |
@@ -308,10 +277,9 @@ Sockets authenticate via HTTP-only cookie during handshake or via an explicit `a
 ## Available NPM Scripts
 
 ### Root Monorepo
-- `npm run dev`: Run all microservices (`auth`, `chat`, `gateway`) and `frontend` concurrently
+- `npm run dev`: Run all microservices (`auth`, `chat`) and `frontend` concurrently
 - `npm run dev:auth`: Run Auth Service only
 - `npm run dev:chat`: Run Chat Service only
-- `npm run dev:gateway`: Run Gateway Service only
 - `npm run dev:frontend`: Run React Frontend only
 - `npm run build`: Build all workspaces for production
 - `npm run lint`: Type-check all workspaces with TypeScript

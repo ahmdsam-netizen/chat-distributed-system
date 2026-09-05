@@ -7,10 +7,9 @@
     "frontend"
   ],
   "scripts": {
-    "dev": "concurrently -n auth,chat,gateway,frontend -c green,red,yellow,magenta \"npm run dev:auth\" \"npm run dev:chat\" \"npm run dev:gateway\" \"npm run dev:frontend\"",
+    "dev": "concurrently -n auth,chat,frontend -c green,red,magenta \"npm run dev:auth\" \"npm run dev:chat\" \"npm run dev:frontend\"",
     "dev:auth": "npm run dev --workspace=services/auth",
     "dev:chat": "npm run dev --workspace=services/chat",
-    "dev:gateway": "npm run dev --workspace=services/gateway",
     "dev:frontend": "npm run dev --workspace=frontend",
     "build": "npm run build --workspaces",
     "lint": "npm run lint --workspaces"

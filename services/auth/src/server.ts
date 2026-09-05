@@ -45,5 +45,5 @@ app.get("/", (_req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`🚀 Auth Service listening on port ${port}`);
+  console.log(`Auth Service listening on port ${port}`);
 });
